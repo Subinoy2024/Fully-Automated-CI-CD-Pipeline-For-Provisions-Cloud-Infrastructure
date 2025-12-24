@@ -1,57 +1,121 @@
-module "resource_group" {
-  source   = "../../modules/azurerm_resource_group"
-  name     = local.naming.rg
-  location = var.location
-  tags     = local.tags
+module "resource_groups" {
+  source          = "../../modules/azurerm_resource_group"
+  resource_groups = local.resource_groups
+}
+resource "random_string" "sql_suffix" {
+  length  = 4
+  upper   = false
+  special = false
+  lower   = true
+  numeric = true
 }
 
-module "vnet" {
-  source        = "../../modules/azurerm_virtual_network"
-  name          = local.naming.vnet
-  location      = var.location
-  rg_name       = module.resource_group.name
-  address_space = ["10.10.0.0/16"]
-  tags          = local.tags
-}
+module "vnets" {
+  source     = "../../modules/azurerm_virtual_network"
+  depends_on = [module.resource_groups]
 
-module "subnet" {
-  source              = "../../modules/azurerm_subnet"
-  name                = local.naming.snet
-  rg_name             = module.resource_group.name
-  vnet_name           = module.vnet.name
-  address_prefixes    = ["10.10.1.0/24"]
-}
+  vnets = {
+    for name, v in local.vnets :
+    name => merge(
 
-module "nsg" {
-  source   = "../../modules/azurerm_network_security_group"
-  name     = local.naming.nsg
-  location = var.location
-  rg_name  = module.resource_group.name
-  tags     = local.tags
-
-  rules = {
-    ssh = {
-      priority  = 100
-      direction = "Inbound"
-      access    = "Allow"
-      protocol  = "Tcp"
-      port      = "22"
-    }
+      v,
+      {
+        resource_group_name = module.resource_groups.names[v.resource_group_name]
+      }
+    )
   }
 }
 
-module "storage" {
-  source   = "../../modules/azurerm_storage_account"
-  name     = local.naming.sa
-  location = var.location
-  rg_name  = module.resource_group.name
-  tags     = local.tags
+
+module "subnets" {
+  depends_on = [module.vnets]
+  source     = "../../modules/azurerm_subnet"
+  subnets    = local.subnets
 }
 
-module "keyvault" {
-  source   = "../../modules/azurerm_key_vault"
-  name     = local.naming.kv
-  location = var.location
-  rg_name  = module.resource_group.name
-  tags     = local.tags
+module "nsgs" {
+  depends_on = [module.resource_groups, module.subnets, module.vnets]
+  source     = "../../modules/azurerm_network_security_group"
+  nsgs       = local.nsgs
+  nsg_rules  = local.nsg_rules
+}
+
+module "nsg_associations" {
+  depends_on = [module.vnets, module.subnets, module.nsgs]
+  source     = "../../modules/azurerm_nsg_rules_association"
+
+  subnet_nsg_associations = local.subnet_nsg_associations
+}
+
+module "public_ips" {
+  depends_on = [module.vnets]
+  source     = "../../modules/azurerm_public_internet"
+  public_ips = local.public_ips
+}
+
+module "linux_vms" {
+  depends_on = [module.resource_groups, module.vnets, module.subnets, module.nsgs, module.nsg_associations]
+  source     = "../../modules/azurerm_virtual_machine"
+
+  vms = local.vms
+}
+
+module "aks" {
+  depends_on = [module.resource_groups, module.vnets, module.subnets, module.nsgs, module.nsg_associations]
+  source     = "../../modules/azurerm_service_aks"
+
+  aks_clusters = local.aks_clusters
+}
+
+module "sql" {
+  depends_on = [module.subnets]
+  source     = "../../modules/azurerm_sql_service"
+
+  location               = local.sql.location
+  resource_group_name    = local.sql.resource_group_name
+  sql_server_name        = local.sql.sql_server_name
+  administrator_login    = local.sql.administrator_login
+  administrator_password = local.sql.administrator_password
+  sql_version            = "12.0"
+
+  vnet_name   = local.sql.vnet_name
+  subnet_name = local.sql.subnet_name
+
+  databases = local.sql.databases
+  tags      = local.sql.tags
+}
+
+module "bastion" {
+  depends_on = [module.subnets, module.vnets]
+  source     = "../../modules/azurerm_bastion_service"
+
+  location            = local.bastion.location
+  resource_group_name = local.bastion.resource_group_name
+
+  bastion_name = local.bastion.bastion_name
+  vnet_name    = local.bastion.vnet_name
+  subnet_name  = local.bastion.subnet_name
+
+  public_ip_id = local.bastion.public_ip_id
+  sku          = local.bastion.sku
+  tags         = local.bastion.tags
+
+}
+
+
+
+
+module "key_vault" {
+  source = "../../modules/azurerm_key_vault"
+
+  name                = "kv-${var.environment}-core-${random_string.sql_suffix.result}"
+  location            = var.location
+  resource_group_name = "rg-${var.environment}-core"
+
+  secrets = local.azurerm_key_vault_secret
+  tags    = local.common_tags
+
+  depends_on = [
+    module.resource_groups,module.linux_vms,module.sql,module.vnets
+  ]
 }

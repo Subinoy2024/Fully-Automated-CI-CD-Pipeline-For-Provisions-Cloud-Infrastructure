@@ -1,3 +1,7 @@
-variable "name" { type = string }
-variable "location" { type = string }
-variable "tags" { type = map(string) }
+variable "resource_groups" {
+  description = "Map of resource groups"
+  type = map(object({
+    location = string
+    tags     = map(string)
+  }))
+}
